@@ -3,6 +3,8 @@
 import sqlite3
 from pathlib import Path
 
+from psycopg2.extras import execute_values
+
 from database import get_connection, init_db
 
 SQLITE_PATH = Path(__file__).resolve().parent / "data" / "calendar.db"
@@ -29,35 +31,40 @@ def migrate() -> dict[str, int]:
 
     init_db()
     with get_connection() as postgres_connection, postgres_connection.cursor() as cursor:
-        cursor.executemany(
+        execute_values(
+            cursor,
             """
-            INSERT INTO users (id, name, pin) VALUES (%s, %s, %s)
+            INSERT INTO users (id, name, pin) VALUES %s
             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, pin = EXCLUDED.pin
             """,
             [(row["id"], row["name"], row["pin"]) for row in users],
         )
-        cursor.executemany(
+        execute_values(
+            cursor,
             """
-            INSERT INTO tasks (id, code, name, points, active) VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO tasks (id, code, name, points, active) VALUES %s
             ON CONFLICT (id) DO UPDATE SET code = EXCLUDED.code, name = EXCLUDED.name,
             points = EXCLUDED.points, active = EXCLUDED.active
             """,
             [(row["id"], row["code"], row["name"], row["points"], bool(row["active"])) for row in tasks],
         )
-        cursor.executemany(
+        execute_values(
+            cursor,
             """
             INSERT INTO calendar_assignments (month, week_no, work_date, day_of_week, task_id, user_id, assigned_points)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES %s
             ON CONFLICT (work_date, task_id, user_id) DO UPDATE SET month = EXCLUDED.month,
             week_no = EXCLUDED.week_no, day_of_week = EXCLUDED.day_of_week,
             assigned_points = EXCLUDED.assigned_points
             """,
             [(row["month"], row["week_no"], row["work_date"], row["day_of_week"], row["task_id"], row["user_id"], row["assigned_points"]) for row in assignments],
+            page_size=1000,
         )
-        cursor.executemany(
+        execute_values(
+            cursor,
             """
             INSERT INTO compliance_records (work_date, task_id, assigned_user_id, evaluator_user_id, assigned_points, completed, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES %s
             ON CONFLICT (work_date, task_id, assigned_user_id, evaluator_user_id)
             DO UPDATE SET assigned_points = EXCLUDED.assigned_points, completed = EXCLUDED.completed
             """,

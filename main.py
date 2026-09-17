@@ -2,20 +2,36 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .database import (
-    add_evaluation,
-    authenticate_user,
-    get_assignments_for_day,
-    get_calendar,
-    get_daily_validations,
-    get_tasks,
-    get_user_dashboard,
-    get_users,
-    report_for_month,
-    report_for_week,
-    report_for_year,
-    init_db,
-)
+try:
+    from .database import (
+        add_evaluation,
+        authenticate_user,
+        get_assignments_for_day,
+        get_calendar,
+        get_daily_validations,
+        get_tasks,
+        get_user_dashboard,
+        get_users,
+        report_for_month,
+        report_for_week,
+        report_for_year,
+        init_db,
+    )
+except ImportError:
+    from database import (
+        add_evaluation,
+        authenticate_user,
+        get_assignments_for_day,
+        get_calendar,
+        get_daily_validations,
+        get_tasks,
+        get_user_dashboard,
+        get_users,
+        report_for_month,
+        report_for_week,
+        report_for_year,
+        init_db,
+    )
 
 app = FastAPI(title="Sistema Responsabilidades PicaRico", version="2.0.0")
 app.add_middleware(
