@@ -43,10 +43,16 @@ Ejecuta la migración después de que `DATABASE_URL` conecte correctamente a Sup
 Desde la raíz del proyecto:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 La documentación interactiva queda disponible en `http://127.0.0.1:8000/docs`.
+
+## Deploy en Render
+
+- `runtime.txt` fija Python a `3.11.10` para que Render use ruedas precompiladas compatibles con las dependencias actuales.
+- **Build Command**: `pip install -r requirements.txt`
+- **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 
 ## Endpoints principales
 
