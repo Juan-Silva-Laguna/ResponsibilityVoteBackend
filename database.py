@@ -3,6 +3,7 @@ import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from dotenv import load_dotenv
@@ -11,6 +12,7 @@ from psycopg2.extras import RealDictCursor, execute_values
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/Bogota")
 DAY_CODES = ("lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo")
 USERS = ((1, "Alexa", "1508"), (2, "Michell", "1515"))
 TASKS = (
@@ -26,6 +28,10 @@ def get_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL no está configurada. Define la conexión de PostgreSQL en el entorno o en .env.")
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor, connect_timeout=10)
+
+
+def business_today() -> date:
+    return datetime.now(ZoneInfo(APP_TIMEZONE)).date()
 
 
 def init_db() -> None:
@@ -53,6 +59,24 @@ def init_db() -> None:
                 assigned_points DOUBLE PRECISION NOT NULL, completed BOOLEAN NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(work_date, task_id, assigned_user_id, evaluator_user_id)
+            );
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id BIGSERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                endpoint TEXT NOT NULL UNIQUE,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id
+                ON push_subscriptions(user_id);
+            CREATE TABLE IF NOT EXISTS notification_deliveries (
+                id BIGSERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                work_date DATE NOT NULL,
+                sent_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, work_date)
             );
         """)
         cursor.executemany(
@@ -242,13 +266,38 @@ def get_assignments_for_day(month: str, work_date: str) -> list[dict[str, Any]]:
         return cursor.fetchall()
 
 
+def close_overdue_evaluations(today: date | None = None) -> int:
+    cutoff = today or business_today()
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO compliance_records
+                (work_date, task_id, assigned_user_id, evaluator_user_id, assigned_points, completed)
+            SELECT assignment.work_date, assignment.task_id, assignment.user_id,
+                   evaluator.id, assignment.assigned_points, TRUE
+            FROM calendar_assignments assignment
+            JOIN users evaluator ON evaluator.id <> assignment.user_id
+            WHERE assignment.work_date < %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM compliance_records record
+                  WHERE record.work_date = assignment.work_date
+                    AND record.task_id = assignment.task_id
+                    AND record.assigned_user_id = assignment.user_id
+                    AND record.evaluator_user_id = evaluator.id
+              )
+            ON CONFLICT (work_date, task_id, assigned_user_id, evaluator_user_id) DO NOTHING
+        """, (cutoff,))
+        return cursor.rowcount
+
+
 def report_for_week(month: str, week_no: int) -> dict[str, Any]:
     ensure_month_schedule(month)
+    close_overdue_evaluations()
     return report(month, "ca.week_no = %s", (week_no,), "week_no", week_no)
 
 
 def report_for_month(month: str) -> dict[str, Any]:
     ensure_month_schedule(month)
+    close_overdue_evaluations()
     return report(month, "TRUE", (), "month", month)
 
 
@@ -257,6 +306,7 @@ def report_for_year(year: int) -> dict[str, Any]:
         raise ValueError("El año debe estar entre 2000 y 2100.")
     for month_number in range(1, 13):
         ensure_month_schedule(f"{year}-{month_number:02d}")
+    close_overdue_evaluations()
     with get_connection() as connection, connection.cursor() as cursor:
         cursor.execute("""
             SELECT u.id AS user_id, u.name AS user_name,
@@ -299,6 +349,9 @@ def get_user_dashboard(month: str, user_id: int, week_no: int) -> dict[str, Any]
 
 
 def add_evaluation(work_date: str, task_id: int, assigned_user_id: int, evaluator_user_id: int, completed: bool) -> dict[str, Any]:
+    evaluation_date = date.fromisoformat(work_date)
+    if evaluation_date != business_today():
+        raise ValueError("La votación sólo está disponible para el día actual.")
     if assigned_user_id == evaluator_user_id:
         raise ValueError("Una persona no puede evaluarse a sí misma.")
     with get_connection() as connection, connection.cursor() as cursor:
@@ -317,6 +370,73 @@ def add_evaluation(work_date: str, task_id: int, assigned_user_id: int, evaluato
 
 
 def get_daily_validations(work_date: str) -> list[dict[str, Any]]:
+    close_overdue_evaluations()
     with get_connection() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT id, work_date::text, task_id, assigned_user_id, evaluator_user_id, assigned_points, completed FROM compliance_records WHERE work_date = %s::date", (work_date,))
         return cursor.fetchall()
+
+
+def save_push_subscription(user_id: int, endpoint: str, p256dh: str, auth: str) -> dict[str, Any]:
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (endpoint) DO UPDATE SET
+                user_id = EXCLUDED.user_id,
+                p256dh = EXCLUDED.p256dh,
+                auth = EXCLUDED.auth,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING id, user_id, endpoint
+        """, (user_id, endpoint, p256dh, auth))
+        return cursor.fetchone()
+
+
+def delete_push_subscription(endpoint: str) -> bool:
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("DELETE FROM push_subscriptions WHERE endpoint = %s", (endpoint,))
+        return cursor.rowcount > 0
+
+
+def get_push_subscriptions(user_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT id, user_id, endpoint, p256dh, auth
+            FROM push_subscriptions WHERE user_id = %s ORDER BY id
+        """, (user_id,))
+        return cursor.fetchall()
+
+
+def get_pending_vote_reminders(work_date: date) -> list[dict[str, Any]]:
+    ensure_month_schedule(work_date.strftime("%Y-%m"))
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT evaluator.id AS user_id, evaluator.name AS user_name,
+                   COUNT(*) AS pending_count
+            FROM users evaluator
+            JOIN calendar_assignments assignment
+              ON assignment.work_date = %s
+             AND assignment.user_id <> evaluator.id
+            LEFT JOIN compliance_records record
+              ON record.work_date = assignment.work_date
+             AND record.task_id = assignment.task_id
+             AND record.assigned_user_id = assignment.user_id
+             AND record.evaluator_user_id = evaluator.id
+            WHERE record.id IS NULL
+                            AND NOT EXISTS (
+                                    SELECT 1 FROM notification_deliveries delivery
+                                    WHERE delivery.user_id = evaluator.id
+                                        AND delivery.work_date = %s
+                            )
+            GROUP BY evaluator.id, evaluator.name
+            HAVING COUNT(*) > 0
+            ORDER BY evaluator.id
+        """, (work_date, work_date))
+        return cursor.fetchall()
+
+
+def mark_notification_delivered(user_id: int, work_date: date) -> None:
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO notification_deliveries (user_id, work_date)
+            VALUES (%s, %s) ON CONFLICT (user_id, work_date) DO NOTHING
+        """, (user_id, work_date))

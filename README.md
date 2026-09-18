@@ -10,6 +10,13 @@ API REST construida con FastAPI y PostgreSQL/Supabase para el Sistema Responsabi
 - Votación de cumplimiento entre compañeras.
 - Reportes por semana, mes y año.
 
+## Regla de votación diaria
+
+- Una usuaria sólo puede votar tareas de su compañera en la fecha actual de Colombia (`America/Bogota`).
+- El backend rechaza votos de fechas pasadas o futuras, aunque se intente llamar la API directamente.
+- Cuando una fecha queda atrás, cada tarea sin evaluación se registra automáticamente como cumplida.
+- Por esta razón los días anteriores nunca permanecen pendientes y los reportes incluyen esos puntos como completados.
+
 ## Archivos
 
 - `main.py`: define los endpoints de FastAPI.
@@ -38,6 +45,34 @@ Set-Location "C:\Users\JuanIgnacioSilvaLagu\Music\calendario_app\backend"
 
 Ejecuta la migración después de que `DATABASE_URL` conecte correctamente a Supabase.
 
+## Notificaciones Web Push
+
+Genera una sola vez las claves VAPID y el secreto del cron:
+
+```powershell
+.\.venv\Scripts\python.exe setup_notifications.py
+```
+
+El comando agrega a `.env` las variables que falten sin mostrar los secretos. Copia sus valores al servicio backend de Render:
+
+- `VAPID_PUBLIC_KEY`
+- `VAPID_PRIVATE_KEY`
+- `VAPID_SUBJECT`
+- `CRON_SECRET`
+- `APP_TIMEZONE=America/Bogota`
+
+Conserva siempre el mismo par de claves VAPID. Cambiarlo invalida las suscripciones existentes de los celulares.
+
+### Configurar cron-job.org
+
+1. Crea un cron job con URL `https://responsibilityvotebackend.onrender.com/notifications/send-reminders`.
+2. Usa método `POST`.
+3. Añade el encabezado `Authorization: Bearer TU_CRON_SECRET`.
+4. Programa la ejecución diaria a las `03:00 UTC`, equivalente a las `10:00 p. m.` del día anterior en Colombia.
+5. Ejecuta una prueba manual y confirma una respuesta HTTP `200`.
+
+El backend sólo notifica a una usuaria si tiene tareas de su compañera pendientes de votar ese día. Los reintentos no generan avisos duplicados para la misma usuaria y fecha.
+
 ## Ejecutar
 
 Desde la raíz del proyecto:
@@ -63,6 +98,10 @@ La documentación interactiva queda disponible en `http://127.0.0.1:8000/docs`.
 - `GET /reports/week?month=AAAA-MM&week_no=N`: reporte semanal.
 - `GET /reports/month?month=AAAA-MM`: reporte mensual.
 - `GET /reports/year?year=AAAA`: reporte anual.
+- `GET /push/public-key`: clave pública VAPID.
+- `POST /push/subscriptions`: registra un celular.
+- `DELETE /push/subscriptions`: desactiva un celular.
+- `POST /notifications/send-reminders`: envío protegido para cron-job.org.
 
 ## Datos iniciales
 

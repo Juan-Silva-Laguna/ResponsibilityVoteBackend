@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException, Query
+import os
+
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -6,6 +8,8 @@ try:
     from .database import (
         add_evaluation,
         authenticate_user,
+        business_today,
+        close_overdue_evaluations,
         get_assignments_for_day,
         get_calendar,
         get_daily_validations,
@@ -16,11 +20,16 @@ try:
         report_for_week,
         report_for_year,
         init_db,
+        save_push_subscription,
+        delete_push_subscription,
     )
+    from .notifications import send_pending_reminders
 except ImportError:
     from database import (
         add_evaluation,
         authenticate_user,
+        business_today,
+        close_overdue_evaluations,
         get_assignments_for_day,
         get_calendar,
         get_daily_validations,
@@ -31,7 +40,10 @@ except ImportError:
         report_for_week,
         report_for_year,
         init_db,
+        save_push_subscription,
+        delete_push_subscription,
     )
+    from notifications import send_pending_reminders
 
 app = FastAPI(title="Sistema Responsabilidades PicaRico", version="2.0.0")
 app.add_middleware(
@@ -56,9 +68,25 @@ class EvaluationRequest(BaseModel):
     completed: bool
 
 
+class PushKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+
+class PushSubscriptionRequest(BaseModel):
+    user_id: int
+    endpoint: str
+    keys: PushKeys
+
+
+class PushUnsubscribeRequest(BaseModel):
+    endpoint: str
+
+
 @app.on_event("startup")
 def start_db() -> None:
     init_db()
+    close_overdue_evaluations()
 
 
 @app.get("/health")
@@ -94,7 +122,12 @@ def calendar_view(month: str = Query(...)) -> dict:
 
 @app.get("/schedule")
 def schedule(month: str = Query(...), work_date: str = Query(...)) -> dict:
-    return {"month": month, "work_date": work_date, "assignments": get_assignments_for_day(month, work_date)}
+    return {
+        "month": month,
+        "work_date": work_date,
+        "can_vote": work_date == business_today().isoformat(),
+        "assignments": get_assignments_for_day(month, work_date),
+    }
 
 
 @app.get("/dashboard")
@@ -131,3 +164,38 @@ def create_evaluation(payload: EvaluationRequest) -> dict:
         return {"evaluation": add_evaluation(**payload.model_dump())}
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/push/public-key")
+def push_public_key() -> dict:
+    public_key = os.getenv("VAPID_PUBLIC_KEY")
+    if not public_key:
+        raise HTTPException(status_code=503, detail="Web Push no está configurado.")
+    return {"public_key": public_key}
+
+
+@app.post("/push/subscriptions")
+def subscribe_push(payload: PushSubscriptionRequest) -> dict:
+    subscription = save_push_subscription(
+        user_id=payload.user_id,
+        endpoint=payload.endpoint,
+        p256dh=payload.keys.p256dh,
+        auth=payload.keys.auth,
+    )
+    return {"subscription": subscription}
+
+
+@app.delete("/push/subscriptions")
+def unsubscribe_push(payload: PushUnsubscribeRequest) -> dict:
+    return {"deleted": delete_push_subscription(payload.endpoint)}
+
+
+@app.post("/notifications/send-reminders")
+def send_reminders(authorization: str | None = Header(default=None)) -> dict:
+    cron_secret = os.getenv("CRON_SECRET")
+    if not cron_secret or authorization != f"Bearer {cron_secret}":
+        raise HTTPException(status_code=401, detail="No autorizado.")
+    try:
+        return send_pending_reminders()
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
