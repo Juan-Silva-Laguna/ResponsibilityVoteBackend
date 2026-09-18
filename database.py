@@ -24,7 +24,7 @@ TASKS = (
 
 def get_connection():
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL no está configurada. Define la conexión de PostgreSQL en el entorno o en backend/.env.")
+        raise RuntimeError("DATABASE_URL no está configurada. Define la conexión de PostgreSQL en el entorno o en .env.")
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor, connect_timeout=10)
 
 
