@@ -6,7 +6,7 @@ from typing import Any
 
 import psycopg2
 from dotenv import load_dotenv
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -99,18 +99,92 @@ def daily_template(work_date: date) -> list[tuple[int, int, float]]:
     cycle = cycle_number(work_date)
     high, low = (2.1, 0.9) if cycle in (2, 4) else (1.8, 1.2)
     if weekday == 0:
-        return [(1, 1, 3), (1, 2, 3), (3, 1, 4), (3, 2, 4), (2, 1, high), (2, 2, low)]
+        return [(1, 1, 3), (1, 2, 3), (3, 1, 4), (3, 2, 4), (2, 1, high), (2, 2, low), (4, 2, 3)]
     if weekday == 1:
         fruit_owner = 2 if cycle == 2 else 1
         return [(1, 1, 3), (1, 2, 3), (3, 1, 4), (3, 2, 4), (2, 1, high), (2, 2, low), (5, fruit_owner, 2), (4, 2, 3)]
     if weekday == 2:
         return [(2, 1, 3), (6, 1, 3), (7, 1, 2), (8, 1, 4), (9, 1, 2)]
     if weekday == 3:
-        return [(2, 2, 3), (6, 2, 3), (7, 2, 2), (8, 2, 4), (9, 2, 2), (10, 2, 3)]
+        return [(2, 2, 3), (6, 2, 3), (7, 2, 2), (8, 2, 4), (9, 2, 2)]
+    if weekday == 4:
+        operation = [(2, 1, 3), (7, 1, 2), (8, 1, 4), (9, 1, 2)]
+        preparation = (10, 2, 3) if cycle in (2, 4) else (10, 1, 3)
+        return [*operation, preparation]
     if weekday == 5:
         alexa_domicilios, michell_domicilios = (1.5, 1.5) if cycle in (2, 4) else (2, 1)
-        return [(2, 1, alexa_domicilios), (10, 1, 3), (2, 2, michell_domicilios)]
+        return [(2, 1, alexa_domicilios), (2, 2, michell_domicilios)]
+    if weekday == 6:
+        operation = [(2, 2, 3), (7, 2, 2), (8, 2, 4), (9, 2, 2)]
+        preparation = (10, 1, 3) if cycle in (2, 4) else (10, 2, 3)
+        return [*operation, preparation]
     return []
+
+
+def sync_schedule_from(start_date: date) -> dict[str, int]:
+    """Actualiza calendarios existentes sin borrar asignaciones que ya fueron evaluadas."""
+    init_db()
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT MAX(work_date) AS last_date FROM calendar_assignments")
+        last_date = cursor.fetchone()["last_date"]
+        if not last_date or start_date > last_date:
+            return {"upserted": 0, "removed": 0}
+
+        cursor.execute("""
+            DELETE FROM calendar_assignments ca
+            WHERE ca.work_date >= %s
+              AND ca.day_of_week IN ('jueves', 'sabado')
+              AND ca.task_id = 10
+              AND NOT EXISTS (
+                  SELECT 1 FROM compliance_records cr
+                  WHERE cr.work_date = ca.work_date AND cr.task_id = ca.task_id
+                    AND cr.assigned_user_id = ca.user_id
+              )
+        """, (start_date,))
+        removed = cursor.rowcount
+
+        cursor.execute("""
+            DELETE FROM calendar_assignments ca
+            USING tasks t
+            WHERE ca.task_id = t.id AND t.code = 'graba'
+              AND NOT EXISTS (
+                  SELECT 1 FROM compliance_records cr
+                  WHERE cr.work_date = ca.work_date AND cr.task_id = ca.task_id
+                    AND cr.assigned_user_id = ca.user_id
+              )
+        """)
+        removed += cursor.rowcount
+        cursor.execute("""
+            DELETE FROM tasks t
+            WHERE t.code = 'graba'
+              AND NOT EXISTS (SELECT 1 FROM calendar_assignments ca WHERE ca.task_id = t.id)
+              AND NOT EXISTS (SELECT 1 FROM compliance_records cr WHERE cr.task_id = t.id)
+        """)
+
+        rows = []
+        current = start_date
+        while current <= last_date:
+            if current.weekday() in (0, 3, 4, 5, 6):
+                month = current.strftime("%Y-%m")
+                week_no = next(
+                    week["week_no"] for week in month_weeks(month)
+                    if week["start_date"] <= current.isoformat() <= week["end_date"]
+                )
+                rows.extend(
+                    (month, week_no, current, DAY_CODES[current.weekday()], task_id, user_id, points)
+                    for task_id, user_id, points in daily_template(current)
+                )
+            current += timedelta(days=1)
+
+        execute_values(cursor, """
+            INSERT INTO calendar_assignments
+                (month, week_no, work_date, day_of_week, task_id, user_id, assigned_points)
+            VALUES %s
+            ON CONFLICT (work_date, task_id, user_id) DO UPDATE SET
+                month = EXCLUDED.month, week_no = EXCLUDED.week_no,
+                day_of_week = EXCLUDED.day_of_week, assigned_points = EXCLUDED.assigned_points
+        """, rows, page_size=1000)
+        return {"upserted": len(rows), "removed": removed}
 
 
 def ensure_month_schedule(month: str) -> list[dict[str, Any]]:

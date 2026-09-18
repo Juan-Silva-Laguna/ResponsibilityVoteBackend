@@ -1,11 +1,12 @@
 """Migra el esquema vigente de SQLite a PostgreSQL/Supabase sin borrar el origen."""
 
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 from psycopg2.extras import execute_values
 
-from database import get_connection, init_db
+from database import get_connection, init_db, sync_schedule_from
 
 SQLITE_PATH = Path(__file__).resolve().parent / "data" / "calendar.db"
 
@@ -71,12 +72,14 @@ def migrate() -> dict[str, int]:
             [(row["work_date"], row["task_id"], row["assigned_user_id"], row["evaluator_user_id"], row["assigned_points"], bool(row["completed"]), row["created_at"]) for row in evaluations],
         )
 
-    return {
+    migrated = {
         "users": len(users),
         "tasks": len(tasks),
         "calendar_assignments": len(assignments),
         "compliance_records": len(evaluations),
     }
+    migrated.update(sync_schedule_from(date(2026, 9, 18)))
+    return migrated
 
 
 if __name__ == "__main__":

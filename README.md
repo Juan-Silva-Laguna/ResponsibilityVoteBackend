@@ -60,5 +60,12 @@ La documentación interactiva queda disponible en `http://127.0.0.1:8000/docs`.
 
 ## Datos iniciales
 
-- Alexa: PIN `1234`.
-- Michell: PIN `5678`.
+- Alexa: PIN `1508`.
+- Michell: PIN `1515`.
+
+## Distribución recurrente
+
+- Michell tiene la tarea de video todos los lunes.
+- La preparación para la empleada se realiza el mismo viernes o domingo, nunca de forma anticipada jueves o sábado.
+- Los viernes Alexa cubre domicilios, comandas, cuentas y loza. Michell sólo asume la preparación para la empleada en semanas alternas.
+- Los domingos Michell cubre domicilios, comandas, cuentas y loza. Alexa asume la preparación cuando Michell la realizó el viernes.
