@@ -53,7 +53,8 @@ Genera una sola vez las claves VAPID y el secreto del cron:
 .\.venv\Scripts\python.exe setup_notifications.py
 ```
 
-El comando agrega a `.env` las variables que falten sin mostrar los secretos. Copia sus valores al servicio backend de Render:
+El comando agrega a `.env` las variables que falten sin mostrar los secretos. Configura sus valores en
+Cloud Run siguiendo la sección de secretos anterior:
 
 - `VAPID_PUBLIC_KEY`
 - `VAPID_PRIVATE_KEY`
@@ -65,7 +66,7 @@ Conserva siempre el mismo par de claves VAPID. Cambiarlo invalida las suscripcio
 
 ### Configurar cron-job.org
 
-1. Crea un cron job con URL `https://responsibilityvotebackend.onrender.com/notifications/send-reminders`.
+1. Crea un cron job con URL `https://TU_URL_CLOUD_RUN/notifications/send-reminders`.
 2. Usa método `POST`.
 3. Añade el encabezado `Authorization: Bearer TU_CRON_SECRET`.
 4. Programa la ejecución diaria a las `03:00 UTC`, equivalente a las `10:00 p. m.` del día anterior en Colombia.
@@ -83,11 +84,68 @@ Desde la raíz del proyecto:
 
 La documentación interactiva queda disponible en `http://127.0.0.1:8000/docs`.
 
-## Deploy en Render
+## Deploy en Google Cloud Run
 
-- `runtime.txt` fija Python a `3.11.10` para que Render use ruedas precompiladas compatibles con las dependencias actuales.
-- **Build Command**: `pip install -r requirements.txt`
-- **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+El backend incluye `Dockerfile` y escucha el puerto que Cloud Run entrega en la variable `PORT`.
+La base de datos sigue siendo PostgreSQL/Supabase; Cloud Run no debe usarse para guardar el archivo
+local `data/calendar.db`, porque el sistema de archivos del contenedor es efímero.
+
+### 1. Preparar Google Cloud CLI
+
+Instala Google Cloud CLI en Windows desde <https://cloud.google.com/sdk/docs/install> y abre una nueva
+terminal de PowerShell. Luego autentica la cuenta y selecciona el proyecto:
+
+```powershell
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project TU_PROJECT_ID
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com cloudbuild.googleapis.com
+```
+
+### 2. Crear secretos
+
+Desde `backend`, crea cada secreto una sola vez. El contenido se solicita de forma interactiva y no se
+guarda en el repositorio:
+
+```powershell
+Set-Location "C:\Users\JuanIgnacioSilvaLagu\Music\calendario_app\backend"
+gcloud secrets create database-url --replication-policy=automatic
+gcloud secrets versions add database-url --data-file=-
+gcloud secrets create vapid-private-key --replication-policy=automatic
+gcloud secrets versions add vapid-private-key --data-file=-
+gcloud secrets create cron-secret --replication-policy=automatic
+gcloud secrets versions add cron-secret --data-file=-
+```
+
+Para cada comando `versions add`, pega únicamente el valor correspondiente y presiona `Ctrl+Z` y Enter
+en Windows para finalizar la entrada. La clave pública, el asunto VAPID y la zona horaria no son secretos.
+
+### 3. Desplegar
+
+```powershell
+gcloud run deploy calendario-backend `
+	--source . `
+	--region us-central1 `
+	--allow-unauthenticated `
+	--set-env-vars "APP_TIMEZONE=America/Bogota,VAPID_SUBJECT=mailto:TU_CORREO,VAPID_PUBLIC_KEY=TU_CLAVE_PUBLICA_VAPID" `
+	--set-secrets "DATABASE_URL=database-url:latest,VAPID_PRIVATE_KEY=vapid-private-key:latest,CRON_SECRET=cron-secret:latest"
+```
+
+El comando imprime la URL pública del servicio. Verifica el despliegue con:
+
+```powershell
+$url = gcloud run services describe calendario-backend --region us-central1 --format="value(status.url)"
+Invoke-RestMethod "$url/health"
+```
+
+La cuenta de servicio usada por Cloud Run necesita los roles `Secret Manager Secret Accessor` y, si se
+usa la cuenta por defecto para construir desde código fuente, permisos de Cloud Build. Configura el cron
+de recordatorios con `POST $url/notifications/send-reminders` y el encabezado `Authorization: Bearer ...`.
+
+### 4. Migrar datos y actualizar el frontend
+
+Ejecuta `migrate_sqlite.py` una vez desde un entorno local que tenga `DATABASE_URL` apuntando a Supabase.
+Después cambia la URL de API del frontend a la URL de Cloud Run, vuelve a construirlo y publica el frontend.
 
 ## Endpoints principales
 
